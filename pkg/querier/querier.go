@@ -107,6 +107,7 @@ type Querier interface {
 	DetectedFields(ctx context.Context, req *logproto.DetectedFieldsRequest) (*logproto.DetectedFieldsResponse, error)
 	Patterns(ctx context.Context, req *logproto.QueryPatternsRequest) (*logproto.QueryPatternsResponse, error)
 	DetectedLabels(ctx context.Context, req *logproto.DetectedLabelsRequest) (*logproto.DetectedLabelsResponse, error)
+	StructuredMetadata(ctx context.Context, req *logproto.StructuredMetadataRequest) (*logproto.StructuredMetadataResponse, error)
 }
 
 type Limits querier_limits.Limits
@@ -1124,6 +1125,16 @@ func (q *SingleTenantQuerier) DetectedFields(ctx context.Context, req *logproto.
 	return &logproto.DetectedFieldsResponse{
 		Fields:     fields,
 		FieldLimit: req.GetFieldLimit(),
+	}, nil
+}
+
+func (q *SingleTenantQuerier) StructuredMetadata(ctx context.Context, req *logproto.StructuredMetadataRequest) (*logproto.StructuredMetadataResponse, error) {
+	return &logproto.StructuredMetadataResponse{
+		Fields: []*logproto.StructuredMetadata{
+			{
+				Label: "foo",
+			},
+		},
 	}, nil
 }
 
