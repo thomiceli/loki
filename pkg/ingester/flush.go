@@ -2,12 +2,14 @@ package ingester
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/go-kit/log/level"
+	"github.com/grafana/dskit/backoff"
 	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/user"
 	"github.com/prometheus/client_golang/prometheus"
@@ -147,7 +149,7 @@ func (i *Ingester) flushLoop(j int) {
 		}
 		op := o.(*flushOp)
 
-		err := i.flushUserSeries(op.userID, op.fp, op.immediate)
+		err := i.flushOp(op)
 		if err != nil {
 			level.Error(util_log.WithUserID(op.userID, i.logger)).Log("msg", "failed to flush", "err", err)
 		}
@@ -161,7 +163,39 @@ func (i *Ingester) flushLoop(j int) {
 	}
 }
 
-func (i *Ingester) flushUserSeries(userID string, fp model.Fingerprint, immediate bool) error {
+func (i *Ingester) flushOp(op *flushOp) error {
+	// A flush is retried until either it is successful, the maximum number
+	// of retries is exceeded, or the timeout has expired. The context is
+	// used to cancel the backoff should the latter happen.
+	ctx, cancelFunc := context.WithTimeout(context.Background(), i.cfg.FlushOpTimeout)
+	defer cancelFunc()
+
+	b := backoff.New(ctx, i.cfg.FlushOpBackoff)
+	for b.Ongoing() {
+		err := i.flushUserSeries(ctx, op.userID, op.fp, op.immediate)
+		if err == nil {
+			break
+		}
+		level.Error(util_log.WithUserID(op.userID, i.logger)).Log("msg", "failed to flush", "retries", b.NumRetries(), "err", err)
+		b.Wait()
+	}
+
+	if err := b.Err(); err != nil {
+		// If we got here then either the maximum number of retries have been
+		// exceeded or the timeout expired. We do not need to check ctx.Err()
+		// as it is checked in b.Err().
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("timed out after %s: %w", i.cfg.FlushOpTimeout, err)
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (i *Ingester) flushUserSeries(ctx context.Context, userID string, fp model.Fingerprint, immediate bool) error {
+	ctx = user.InjectOrgID(ctx, userID)
+
 	instance, ok := i.getInstanceByID(userID)
 	if !ok {
 		return nil
@@ -175,9 +209,6 @@ func (i *Ingester) flushUserSeries(userID string, fp model.Fingerprint, immediat
 	lbs := labels.String()
 	level.Info(i.logger).Log("msg", "flushing stream", "user", userID, "fp", fp, "immediate", immediate, "num_chunks", len(chunks), "labels", lbs)
 
-	ctx := user.InjectOrgID(context.Background(), userID)
-	ctx, cancel := context.WithTimeout(ctx, i.cfg.FlushOpTimeout)
-	defer cancel()
 	err := i.flushChunks(ctx, fp, labels, chunks, chunkMtx)
 	if err != nil {
 		return fmt.Errorf("failed to flush chunks: %w, num_chunks: %d, labels: %s", err, len(chunks), lbs)
